@@ -1,0 +1,213 @@
+from keras.preprocessing.image import ImageDataGenerator
+import numpy as np
+from scipy.signal import correlate2d
+import math
+from skimage.measure import block_reduce
+
+train_datagen = ImageDataGenerator(rescale=1./255)
+test_datagen = ImageDataGenerator(rescale=1./255)
+
+train_generator = train_datagen.flow_from_directory(
+    'archive/train',
+    target_size=(48,48),
+    batch_size=64,
+    color_mode="grayscale",
+    class_mode='categorical')
+
+test_generator = test_datagen.flow_from_directory(
+    'archive/test',
+    target_size=(48,48),
+    batch_size=64,
+    color_mode="grayscale",
+    class_mode='categorical')
+
+def Correlate(Matrix, Kernel, Bias):
+    #Compute the depth, rows, and columns
+    Depth = len(Matrix) * len(Kernel)
+    Rows = Cols = len(Matrix[0]) - len(Kernel[0]) + 1
+
+    #Initialize the output
+    Z1 = np.zeros((Depth, Rows, Cols))
+
+    #Compute the correlation
+    for i, m in enumerate(Matrix):
+        for j, k in enumerate(Kernel):
+            Z1[i+j] = correlate2d(m, k, mode='valid') + Bias[j]
+
+    return Z1
+
+def CorrelateBackKernel(gradient, matrix1):
+    #Compute the depth, rows, and cols
+    depth = len(gradient)//len(matrix1)
+    rows = cols = len(matrix1[0]) - len(gradient[0]) + 1
+
+    #Initialize the output array
+    Z1 = np.zeros((depth, rows, cols))
+
+    #Compute gradient
+    for i in range(len(gradient)):
+        j = i // depth
+        k = i % depth
+        Z1[k] += correlate2d(matrix1[j], gradient[i], mode='valid') / depth
+
+    return Z1
+
+def MaxPoolby2(Matrix):
+    #Keep track of original shape
+    OriginalShape = Matrix.shape
+
+    #Pad layer if necessary
+    if Matrix.shape[0] % 2 != 0:
+        Matrix = np.pad(Matrix, ((0,0), (0, 1), (0, 1)), mode='constant', constant_values=0)
+
+    #Max Pooling
+    Result = block_reduce(Matrix, (1, 2, 2), np.max)
+
+    #Store location of max values
+    Location = (Matrix == np.repeat(np.repeat(Result, 2, axis=1), 2, axis=2))
+
+    #Remove added padding
+    Result = Result[:, :OriginalShape[0], :OriginalShape[0]]
+    Location = Location[:, :OriginalShape[0], :OriginalShape[0]]
+
+    return Result, Location
+
+def MaxPoolReverse2(matrix, location):
+    #Keep track of og shape
+    original_shape = location.shape
+
+    #Pad location if needed
+    if location.shape[1] % 2 != 0 or location.shape[2] % 2 != 0:
+        location = np.pad(location, ((0,0), (0, 1), (0, 1)), mode='constant', constant_values=0)
+
+    #Create an empty array of the same shape as the location
+    result = np.zeros_like(location)
+
+    #Iterate over the matrix
+    matrix_repeated = np.repeat(np.repeat(matrix, 2, axis=1), 2, axis=2)
+
+    #Multiply the repeated matrix by the location
+    result = matrix_repeated * location
+
+    #Remove the padding
+    result = result[:, :original_shape[0], :original_shape[0]]
+
+    return result
+
+def print_matrix(matrix):
+    for row in matrix:
+        print(' '.join(str(elem) for elem in row))
+
+def LeakyRelu(Z):
+    return np.where(Z < 0, 0.01*Z, Z)
+
+def DerLeakyRelu(Z):
+    return np.where(Z < 0, 0.01, 1)
+
+def Flattener(matrix):
+    NewMatrix = matrix.reshape(matrix.shape[0], -1)
+    return np.expand_dims(NewMatrix, axis=-1)
+
+def Unflatten(matrix):
+    matrix = np.squeeze(matrix, axis=-1)
+    depth, height = matrix.shape
+    newshape = int(math.sqrt(height))
+    return matrix.reshape(depth, newshape, newshape)
+
+def Softmax(X):
+    e_x = np.zeros(X.shape)
+    for i in range(X.shape[0]):
+        e_x[i] = np.exp(X[i] - np.max(X[i]))
+        e_x[i] /= np.sum(X[i])
+    return e_x
+
+#Initialization
+BatchSize = 64
+Kernels = 64
+BatchDim1 = 48
+KernelDim1 = 3
+LearnRate = 0.06
+ImagesTrained = 0
+ImagesTested = 0
+TestAccuracy = 0
+
+Kernel1 = np.random.normal(0, np.sqrt(2/BatchSize*KernelDim1*KernelDim1), (Kernels, KernelDim1, KernelDim1))
+Bias1 = np.random.rand(Kernels, 1) - 0.5
+
+InputDim2 = math.ceil(((BatchDim1-KernelDim1+1)/2)**2)
+OutputDim2 = 7
+Weight2 = np.random.normal(0, np.sqrt(2/InputDim2), (OutputDim2, InputDim2))
+Bias2 = np.random.rand(OutputDim2, 1) - 0.5
+
+for Images, Labels in train_generator:
+    if Images.shape[0] != 64:
+        break
+
+    # Remove the last axis from images
+    Images = np.squeeze(Images, axis=-1)
+
+    # Forward pass
+    ConvOutput = Correlate(Images, Kernel1, Bias1)
+    ReLUOutput = LeakyRelu(ConvOutput)
+    MaxpoolOutput, Location = MaxPoolby2(ReLUOutput)
+    flattened_output = Flattener(MaxpoolOutput)
+    DenseOutput = np.swapaxes(np.tensordot(flattened_output, Weight2, axes=([1],[1])), -1, -2) + Bias2
+    SoftmaxOutput = Softmax(DenseOutput)
+
+    #Adjust labels
+    Labels = np.expand_dims(Labels, axis=-1)
+    Labels1 = np.repeat(Labels, Kernels, axis=0)
+
+    #Compute accuracy
+    Accuracy = np.mean(np.equal(np.argmax(SoftmaxOutput, axis=1), np.argmax(Labels1, axis=1)))
+    print(f'Images: {ImagesTrained} Training accuracy: {Accuracy * 100}%')
+    ImagesTrained += 64
+
+    #Backward propagation
+    dloss = SoftmaxOutput - Labels1
+    dweight2 = np.mean(np.matmul(dloss, flattened_output.transpose(0, 2, 1)), axis=0)
+    dbias2 = np.mean(dloss, axis=0).reshape(-1, 1)
+    dflattened_output = np.matmul(Weight2.T, dloss)
+
+    # Unflatten
+    dmaxpool_output = Unflatten(dflattened_output)
+
+    # Backward pass through the max pooling layer
+    drelu_output = MaxPoolReverse2(dmaxpool_output, Location)
+
+    #Backward through leaky ReLU
+    dconv_output = DerLeakyRelu(ConvOutput) * drelu_output
+    
+    #Backward pass through the convolution layer
+    dkernel1 = CorrelateBackKernel(dconv_output, Images)
+    dbias1 = np.mean(dconv_output.reshape(64, -1, 46, 46), axis=(0, 2, 3)).reshape(-1, 1)
+
+    # Update the weights and biases
+    Kernel1 -= LearnRate * dkernel1
+    Bias1 -= LearnRate * dbias1
+    Weight2 -= LearnRate * dweight2
+    Bias2 -= LearnRate * dbias2
+
+N = 0
+for Images, Labels in test_generator:
+    if Images.shape[0] != 64:
+        TestAccuracy /= (ImagesTested/64)
+        print(f'Final Testing accuracy: {TestAccuracy * 100}%')
+        break 
+
+    # Remove the last axis from images
+    Images = np.squeeze(Images, axis=-1)
+
+    # Forward pass
+    ConvOutput = Correlate(Images, Kernel1, Bias1)
+    ReLUOutput = LeakyRelu(ConvOutput)
+    MaxpoolOutput, Location = MaxPoolby2(ReLUOutput)
+    flattened_output = Flattener(MaxpoolOutput)
+    DenseOutput = np.swapaxes(np.tensordot(flattened_output, Weight2, axes=([1],[1])), -1, -2) + Bias2
+    SoftmaxOutput = Softmax(DenseOutput)
+
+    # Compute the accuracy on the testing data
+    Accuracy = np.mean(np.equal(np.argmax(SoftmaxOutput, axis=1), np.argmax(Labels, axis=1)))
+    TestAccuracy += Accuracy
+    ImagesTested += 64
+    print(f'Images: {ImagesTested} Test accuracy: {Accuracy * 100}%')
