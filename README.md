@@ -1,2 +1,2 @@
 # Convolutional-Neural-Network
-Convolutional Neural Network from scratch. 
+This code takes the FER-2013 dataset, which contains images of peoples faces expressing different emotions, and uses it to train a single layer convolutional neural network. Each function of the convolutional neural network is manually made, including the correlation function, the ReLU function, the max pool function, the softmax function, as well as all of their respecive function for back propagation. The single layer neural network ends up achieving a 25% accuracy over 8000 testing images, beating the random percent chance of 1/7, or 14.3%. 
